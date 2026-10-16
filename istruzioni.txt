@@ -1,0 +1,100 @@
+Nodo 3: pipeline di compute_trajectory (versione aggiornata). 
+La descrizione degli altri nodi è qui: /home/leo/projects/ros2_ws/todo/pcl-surface-reconstruction-pipeline.md
+il nodo 2 è implementato qui: /home/leo/projects/ros2_ws/src/surface_reconstruction
+
+
+Interfaccia del servizio
+
+# request
+float64 row_step
+bool keep_tool_orientation
+---
+bool success
+string message
+geometry_msgs/PoseArray poses
+uint32[] jump_indices
+uint32 discarded_points
+
+Parametri del nodo
+
+point_spacing: passo dei punti lungo la riga
+max_ray_length: lunghezza massima del raggio
+jump_distance_factor: moltiplicatore per la soglia di distanza (es. 2.0)
+jump_angle_threshold (opzionale): soglia sull’angolo tra normali consecutive
+
+1. Input
+
+Mesh letta da topic (nodo 2) o da file, convertita in vtkPolyData.
+Costruisci una sola volta il vtkOBBTree sulla mesh, riusabile per tutte le chiamate finché la mesh non cambia.
+
+2. Frame locale con PCA
+
+Dai vertici della mesh calcola con pcl::PCA baricentro e autovettori.
+e1 = lato lungo, e2 = lato corto, e3 = normale media.
+Forza la terna destra (e3 = e1 × e2), perché il segno degli autovettori è arbitrario.
+Costruisci T_world_local con origine nel baricentro e colonne [e1 e2 e3].
+Se gli autovalori di e1 ed e2 sono quasi uguali, la direzione lunga è instabile: logga un warning.
+
+3. Bounding box locale
+
+Porta i vertici nel frame locale (T⁻¹) e calcola min/max su u (lungo e1), v (lungo e2), w (lungo e3).
+
+4. Serpentina 2D
+
+Righe parallele a e1 per v = v_min, v_min + row_step, … fino a v_max.
+Su ogni riga campiona u ogni point_spacing.
+Le righe dispari sono percorse al contrario.
+Concatena in una lista di punti (u, v) con indice di riga e flag “riga di ritorno”.
+
+5. Ray-casting
+
+Per ogni (u, v), il raggio parte da w_max + margine e punta lungo −e3, con lunghezza ≤ max_ray_length.
+IntersectWithLine: prendi l’intersezione più vicina all’origine del raggio e memorizza l’id della cella.
+Se non c’è intersezione, scarta il punto, incrementa discarded_points e segna che il prossimo punto valido apre un nuovo segmento.
+
+6. Normale locale
+
+Dalla cella colpita prendi la normale del triangolo, oppure interpola con le coordinate baricentriche le normali dei tre vertici.
+Orientala verso il lato da cui arriva il raggio (n·(−e3) > 0, altrimenti inverti).
+
+7. Posa per ogni punto valido
+
+z = normale.
+x di guida = direzione di avanzamento della riga: e1 sulle righe pari, −e1 sulle dispari. Se keep_tool_orientation è vero usi sempre e1.
+Gram-Schmidt: x ← x − (x·z)z, poi normalizza.
+y = z × x.
+Converti [x y z] in quaternione e metti la posizione dell’intersezione.
+
+8. Rilevamento dei salti
+Per ogni posa i (con i > 0), registra i in jump_indices se si verifica almeno una di queste condizioni:
+
+Punti scartati in mezzo: tra la posa i-1 e la i ci sono stati raggi senza intersezione (vale anche per intere righe saltate).
+Distanza: ‖p_i − p_{i-1}‖ > jump_distance_factor × max(point_spacing, row_step). Il max evita di segnalare come salto il normale cambio riga.
+Angolo (opzionale): l’angolo tra n_i e n_{i-1} supera jump_angle_threshold.
+
+Gli indici sono ordinati e mai pari a 0. Il numero di segmenti continui è len(jump_indices) + 1.
+
+9. Output
+
+poses (PoseArray) nel frame della mesh, jump_indices, discarded_points, success, message.
+Pubblica anche su topic per Rviz un PoseArray e un MarkerArray con i segmenti colorati diversamente, così verifichi subito se le soglie dei salti sono tarate bene.
+
+Lato esecutore (nodo a valle)
+
+Spezza il PoseArray agli indici di salto.
+Per ogni segmento calcola il percorso cartesiano sui giunti.
+Tra segmenti consecutivi: retrazione lungo la normale dell’ultima posa, movimento libero fino a sopra la prima posa del segmento successivo, avvicinamento.
+
+Verifiche
+
+Normali di Poisson ben orientate, altrimenti il passo 6 va a caso.
+Righe vicine ai bordi, con pochi punti validi.
+Segmenti con una sola posa: decidi se scartarli o eseguirli.
+Con keep_tool_orientation attivo, sulle righe di ritorno la x può risultare opposta alla direzione di marcia. È voluto, ma controllalo in Rviz.
+
+
+
+Prepara readme e tutorial in inglese 
+commenti in inglese
+licenza apache
+metti i messaggi e servizi custom in un repo a parte

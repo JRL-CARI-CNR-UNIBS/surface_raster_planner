@@ -1,0 +1,22 @@
+raster_planner_node:
+  ros__parameters:
+    # Mesh
+    mesh_frame: "world"           # frame of the mesh read from topic (shape_msgs/Mesh has no header)
+    reference_up: [0.0, 0.0, 1.0] # e3 (ray side) is oriented to agree with this direction (mesh frame)
+    axis_ambiguity_ratio: 0.9     # warn if lambda2 / lambda1 > ratio (long side not well defined)
+
+    # Raster
+    point_spacing: 0.005          # [m] distance between points along a row
+    max_ray_length: 0.5           # [m] upper bound of the ray length
+    ray_margin: 0.01              # [m] rays start at w_max + ray_margin
+    interpolate_normals: true     # barycentric vertex normals (true) or face normal (false)
+    max_raster_points: 1000000    # refuse requests generating more rays
+
+    # Jumps
+    jump_distance_factor: 2.0     # jump if distance > factor * max(point_spacing, row_step)
+    jump_angle_threshold: 0.0     # [rad] jump if consecutive normals differ more; <= 0 disables
+    min_segment_poses: 1          # segments with fewer poses are dropped (1 = keep all)
+
+    # Visualisation
+    marker_line_width: 0.002      # [m]
+    mesh_color: [0.6, 0.6, 0.6, 0.8]
