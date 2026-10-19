@@ -3,7 +3,7 @@
 The tutorial has four parts:
 
 1. **[Test with a synthetic mesh](#1-test-with-a-synthetic-mesh)**: no hardware and no node 2 needed.
-2. **[Use with node 2](#2-use-with-node-2-surface_reconstruction)**: the mesh comes from `cloud_merger_node`.
+2. **[Use with surface reconstruction](#2-use-with-node-2-surface_reconstruction)**: the mesh comes from `cloud_merger_node`.
 3. **[What to check in Rviz](#3-what-to-check-in-rviz)**
 4. **[Parameter tuning and common problems](#4-parameter-tuning-and-common-problems)**
 
@@ -126,7 +126,7 @@ The three rows crossing the hole are interrupted: the 24 rays inside the hole mi
 
 ### 1.7 Reading the mesh from a topic
 
-Node 2 publishes the mesh as a latched `shape_msgs/Mesh`. The test script can do the same; here the patch is also tilted by 0.35 rad (20°) around its long side:
+Surface Reconstruction Node publishes the mesh as a latched `shape_msgs/Mesh`. The test script can do the same; here the patch is also tilted by 0.35 rad (20°) around its long side:
 
 ```bash
 ros2 run surface_raster_planner make_test_mesh.py --publish --topic /cloud_merger_node/mesh --tilt 0.35
@@ -144,9 +144,9 @@ The response now reports `e3 = [0 -0.342 0.94]`: the serpentine plane follows th
 
 ---
 
-## 2. Use with node 2 (`surface_reconstruction`)
+## 2. Use with Surface Reconstruction Node (`surface_reconstruction`)
 
-Start node 2 and reconstruct the surface as described in its tutorial (with `fake_camera.py` or with the real robot), then:
+Start Surface Reconstruction Node and reconstruct the surface as described in its tutorial (with `fake_camera.py` or with the real robot), then:
 
 ```bash
 ros2 launch surface_raster_planner raster_planner.launch.py   # input_mesh defaults to /cloud_merger_node/mesh
