@@ -72,7 +72,13 @@ public:
   /// @param up reference direction (mesh frame) towards which e3 must point
   bool setMesh(const TriangleMesh & mesh, const Eigen::Vector3d & up, std::string & error);
 
+  /**
+   * @brief True if a mesh is loaded.
+   */
   bool hasMesh() const {return tree_ != nullptr;}
+  /**
+   * @brief The loaded mesh.
+   */
   const TriangleMesh & mesh() const {return mesh_;}
 
   /// T_mesh_local: columns [e1 e2 e3], origin in the centroid.
@@ -84,6 +90,21 @@ public:
   /// True if lambda2 / lambda1 > ratio, i.e. the long side direction is not well defined.
   bool isAxisAmbiguous(double ratio) const;
 
+  /**
+   * @brief Compute the raster (serpentine) poses on the mesh.
+   *
+   * Rows are parallel to e1 and spaced by @p row_step along e2; on each row, a ray is cast
+   * along -e3 every options.point_spacing and the hit point becomes a pose with z axis along
+   * the surface normal. A new segment (jump) starts where consecutive poses are far apart
+   * or their normals differ too much.
+   * @param row_step Distance between rows [m] (> 0).
+   * @param keep_tool_orientation If true, the tool x axis is always e1; if false it follows the
+   * travel direction (reversed on return rows).
+   * @param options Raster options.
+   * @param[out] result Poses, jump indices and statistics.
+   * @param[out] error Error message.
+   * @return False if no mesh is loaded, the parameters are invalid, or too many points are requested.
+   */
   bool compute(
     double row_step, bool keep_tool_orientation, const PlannerOptions & options,
     RasterResult & result, std::string & error) const;

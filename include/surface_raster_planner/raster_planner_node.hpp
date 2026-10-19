@@ -29,6 +29,10 @@ namespace surface_raster_planner
 class RasterPlannerNode : public rclcpp::Node
 {
 public:
+  /**
+   * @brief Declare the parameters and create subscriptions, publishers and services.
+   * @param options Node options.
+   */
   explicit RasterPlannerNode(const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
 
 private:
@@ -36,23 +40,47 @@ private:
   using LoadMesh = surface_raster_planner_msgs::srv::LoadMesh;
   using ComputeTrajectory = surface_raster_planner_msgs::srv::ComputeTrajectory;
 
+  /**
+   * @brief Declare the node parameters.
+   */
   void declareParameters();
 
+  /**
+   * @brief Store the last mesh received on the mesh topic (loaded only on request).
+   */
   void meshCallback(const shape_msgs::msg::Mesh::SharedPtr msg);
 
+  /**
+   * @brief Service: use the last mesh received on the topic.
+   */
   void loadFromTopicCallback(
     const Trigger::Request::SharedPtr req, Trigger::Response::SharedPtr res);
+  /**
+   * @brief Service: load a mesh from file.
+   */
   void loadFromFileCallback(
     const LoadMesh::Request::SharedPtr req, LoadMesh::Response::SharedPtr res);
+  /**
+   * @brief Service: compute the raster poses on the loaded mesh.
+   */
   void computeTrajectoryCallback(
     const ComputeTrajectory::Request::SharedPtr req, ComputeTrajectory::Response::SharedPtr res);
 
   /// Replaces the current mesh (PCA frame + OBB tree are rebuilt). Returns a description.
   bool setMesh(const TriangleMesh & mesh, const std::string & frame_id, std::string & message);
 
+  /**
+   * @brief Read the raster options from the current parameters.
+   */
   PlannerOptions readOptions() const;
 
+  /**
+   * @brief Publish the loaded mesh as an RViz marker.
+   */
   void publishMeshMarker();
+  /**
+   * @brief Publish the raster poses (PoseArray and markers) for RViz.
+   */
   void publishPath(const RasterResult & result);
 
   // ROS interfaces
