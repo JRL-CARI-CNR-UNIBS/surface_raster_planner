@@ -12,6 +12,8 @@
 #include <sstream>
 #include <vector>
 
+#include <rclcpp/version.h>
+
 #include <pcl/PolygonMesh.h>
 #include <pcl/conversions.h>
 #include <pcl/io/vtk_lib_io.h>
@@ -27,6 +29,14 @@ using std::placeholders::_2;
 
 namespace
 {
+// Humble's create_service() only takes rmw_qos_profile_t; Jazzy (rclcpp 28+) takes rclcpp::QoS
+// and deprecates the rmw overload.
+#if RCLCPP_VERSION_MAJOR >= 28
+rclcpp::QoS serviceQoS() {return rclcpp::ServicesQoS();}
+#else
+const rmw_qos_profile_t & serviceQoS() {return rmw_qos_profile_services_default;}
+#endif
+
 
 std_msgs::msg::ColorRGBA rgba(double r, double g, double b, double a = 1.0)
 {
@@ -130,15 +140,15 @@ RasterPlannerNode::RasterPlannerNode(const rclcpp::NodeOptions & options)
   load_topic_srv_ = create_service<Trigger>(
     "~/load_mesh_from_topic",
     std::bind(&RasterPlannerNode::loadFromTopicCallback, this, _1, _2),
-    rclcpp::ServicesQoS(), srv_group_);
+    serviceQoS(), srv_group_);
   load_file_srv_ = create_service<LoadMesh>(
     "~/load_mesh_from_file",
     std::bind(&RasterPlannerNode::loadFromFileCallback, this, _1, _2),
-    rclcpp::ServicesQoS(), srv_group_);
+    serviceQoS(), srv_group_);
   compute_srv_ = create_service<ComputeTrajectory>(
     "~/compute_trajectory",
     std::bind(&RasterPlannerNode::computeTrajectoryCallback, this, _1, _2),
-    rclcpp::ServicesQoS(), srv_group_);
+    serviceQoS(), srv_group_);
 
   RCLCPP_INFO(
     get_logger(), "raster_planner_node ready: mesh topic '%s'", mesh_sub_->get_topic_name());
