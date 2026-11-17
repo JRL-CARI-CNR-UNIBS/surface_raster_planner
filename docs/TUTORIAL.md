@@ -124,7 +124,22 @@ jump_indices=[423, 537, 568], discarded_points=24
 
 The three rows crossing the hole are interrupted: the 24 rays inside the hole miss the mesh, and each interruption opens a new segment. In Rviz every segment has a different colour and the jumps are drawn as thin grey lines. The executor splits the path at `jump_indices` and, at each jump, retracts the tool along the normal and approaches the next segment from above.
 
-### 1.7 Reading the mesh from a topic
+### 1.7 Inclined rows and edge margin
+
+Rows at 30° (0.5236 rad) from the long side, and poses kept at least 1.5 cm from the boundary (outline and hole):
+
+```bash
+ros2 service call /raster_planner_node/compute_trajectory surface_raster_planner_msgs/srv/ComputeTrajectory \
+    "{row_step: 0.02, keep_tool_orientation: false, row_angle: 0.5236, edge_margin: 0.015}"
+```
+
+```
+message='748 poses in 13 segments (21 rows, 1995 rays, 1021 discarded points, 226 points within edge_margin) in 18 ms'
+```
+
+The rows now cover the bounding box of the patch rotated by 30°, so many rays at the row ends fall outside the patch (`discarded_points`): this alone does not split the serpentine, only the distance between the end of a row and the start of the next one does. Where a row meets the long side at a shallow angle, consecutive row ends are shifted by `row_step / tan(30°)` along the row and the change of row becomes a jump (`> jump_distance_factor · row_step`); the other segments come from the hole. In Rviz the poses stop 1.5 cm before the outline and form a ring around the hole; the response reports them as `edge_discarded_points`. With `row_angle: 1.5708` (90°) the rows follow the short side.
+
+### 1.8 Reading the mesh from a topic
 
 Surface Reconstruction Node publishes the mesh as a latched `shape_msgs/Mesh`. The test script can do the same; here the patch is also tilted by 0.35 rad (20°) around its long side:
 
@@ -170,7 +185,7 @@ Things to check:
 | PCA frame | `path_markers`, ns `pca_frame` | red `e1` along the long side, blue `e3` towards the tool. If `e3` points into the table, fix `reference_up` |
 | Normals | `poses` with *Shape = Axes* | blue z axes perpendicular to the surface and all on the tool side. Normals pointing randomly mean a bad mesh (see section 4) |
 | Segments | `path_markers`, ns `segments` | one colour per segment. Many short segments on a continuous surface mean jump thresholds too tight |
-| Borders | `path_markers`, ns `points` | rows near `v_min`/`v_max` and the ends of each row may have few valid points; single-pose segments are listed in the response |
+| Borders | `path_markers`, ns `points` | rows near `v_min`/`v_max` and the ends of each row may have few valid points; single-pose segments are listed in the response. Use `edge_margin` to keep the tool away from the boundary |
 | Return rows | `poses` | with `keep_tool_orientation: true` the x axis is opposite to the travel direction on odd rows (intended) |
 
 ---
@@ -183,6 +198,8 @@ Things to check:
 |---|---|
 | `point_spacing` | 1–2 times the mesh edge length; smaller values only interpolate the same triangles |
 | `row_step` (request) | the tool working width minus the desired overlap |
+| `row_angle` (request) | 0 for long rows (fewer row changes); rotate to follow the grain/fibres or the preferred tool direction |
+| `edge_margin` (request) | about half the tool width, to keep the tool footprint on the surface; 0 to work up to the border |
 | `jump_distance_factor` | 2–3: large enough to tolerate the slope of the surface, small enough to catch gaps |
 | `jump_angle_threshold` | 0 (disabled), or 0.5–1.0 rad (≈ 30–60°) to split the path at sharp edges |
 | `max_ray_length` | a few centimetres more than the surface height (`w` size in the load message) |
@@ -199,5 +216,6 @@ Things to check:
 | Noisy, irregular normals | coarse or rippled mesh, inconsistent Poisson normals | `interpolate_normals: true`; improve the mesh in node 2 (MLS radius, Poisson depth) |
 | Many jumps on a continuous surface | steep regions: the 3D distance between rays exceeds the threshold | increase `jump_distance_factor`, or `jump_angle_threshold` too tight |
 | Gaps not detected as jumps | Poisson filled the hole (not trimmed in node 2) | decrease `poisson_trim_distance` in node 2; or use `jump_angle_threshold` |
-| Many single-pose segments at the borders | rows grazing the mesh boundary | `min_segment_poses: 2` (or more) drops them |
+| Many single-pose segments at the borders | rows grazing the mesh boundary | `edge_margin` of a few mm, or `min_segment_poses: 2` (or more) |
+| `all the hit points are closer than edge_margin` | `edge_margin` larger than half the surface width | decrease it |
 | `the raster would have ... points` | `point_spacing` or `row_step` too small for the surface size | increase them, or `max_raster_points` |

@@ -38,30 +38,46 @@ Typical sequence:
 ```bash
 ros2 service call /raster_planner_node/load_mesh_from_topic std_srvs/srv/Trigger
 ros2 service call /raster_planner_node/compute_trajectory surface_raster_planner_msgs/srv/ComputeTrajectory \
-    "{row_step: 0.02, keep_tool_orientation: false}"
+    "{row_step: 0.02, keep_tool_orientation: false, row_angle: 0.0, edge_margin: 0.0}"
 ```
+
+### `compute_trajectory` request
+
+| Field | Unit | Description |
+|---|---|---|
+| `row_step` | m | distance between consecutive rows, measured along `d2` (across the rows) |
+| `keep_tool_orientation` | – | `true`: tool `x` always along `d1`; `false`: along the travel direction |
+| `row_angle` | rad | inclination of the rows: `d1` = `e1` rotated by `row_angle` around `e3` (counter-clockwise seen from `+e3`). `0` = long side, `π/2` = short side |
+| `edge_margin` | m | poses closer than this (3D distance) to the surface boundary are dropped; `0` disables |
+
+The response also reports `edge_discarded_points`, the hit points dropped by `edge_margin`. Fields left out of the request default to `0`, so existing callers keep the previous behaviour.
 
 ## Algorithm
 
 ```
-load_mesh_from_topic / load_mesh_from_file          compute_trajectory(row_step, keep_tool_orientation)
+load_mesh_from_topic / load_mesh_from_file          compute_trajectory(row_step, keep_tool_orientation,
+                                                                       row_angle, edge_margin)
 ──────────────────────────────────────────          ───────────────────────────────────────────────────
-mesh → vtkPolyData (degenerate triangles dropped)   rows parallel to e1 at v = v_min + k·row_step
+mesh → vtkPolyData (degenerate triangles dropped)   (d1, d2) = (e1, e2) rotated by row_angle around e3
+                                                     → bounding box in the rotated frame
+                                                     → rows parallel to d1 at v = v_min + k·row_step
  → PCA on the vertices: e1, e2, e3 = e1 × e2         → points every point_spacing along u, odd rows reversed
  → e3 oriented along reference_up                    → for each (u, v): ray from w_max + ray_margin along −e3
  → bounding box in the local frame (u, v, w)         → closest hit (vtkOBBTree::IntersectWithLine)
  → face / vertex normals                             → normal (barycentric or face), oriented towards +e3
- → vtkOBBTree (built once per mesh)                  → pose: z = normal, x = travel direction (Gram-Schmidt)
+ → vtkOBBTree (built once per mesh)                  → drop hits closer than edge_margin to the boundary
+ → boundary edges + vtkCellLocator                   → pose: z = normal, x = travel direction (Gram-Schmidt)
                                                      → jump detection → PoseArray + markers
 ```
 
 1. **Local frame (PCA).** `e1` = major axis (long side of the serpentine), `e2` = intermediate axis (short side), `e3 = e1 × e2` (mean normal). The eigenvector signs are arbitrary, so they are fixed as follows: the largest component of `e1` is positive, and `e3` points to the same side as `reference_up` (if not, the frame is rotated by π around `e1`). The rays come from the `+e3` side, so `reference_up` must point to the side where the tool is. If `λ2 / λ1 > axis_ambiguity_ratio` the long side is not well defined (e.g. an almost square patch): a warning is logged and reported in the service response.
-2. **Serpentine.** Rows parallel to `e1` from `v_min` to `v_max` with step `row_step`; along each row the points are spaced by `point_spacing` (independent of `row_step`). Odd rows are travelled backwards.
-3. **Ray casting.** The ray starts at `w_max + ray_margin` and its length is `min(max_ray_length, w_max − w_min + 2·ray_margin)`. The hit closest to the ray origin is used. If the ray misses the mesh the point is discarded (`discarded_points`) and the next valid point opens a new segment.
+2. **Serpentine.** The raster frame `(d1, d2, e3)` is the local frame rotated by `row_angle` around `e3`: `d1 = cos(a)·e1 + sin(a)·e2`, `d2 = e3 × d1`. The bounding box of the vertices is computed in this frame (for `row_angle = 0` it is the local box). Rows parallel to `d1` from `v_min` to `v_max` with step `row_step`; along each row the points are spaced by `point_spacing` (independent of `row_step`). Odd rows are travelled backwards.
+3. **Ray casting.** The ray starts at `w_max + ray_margin` and its length is `min(max_ray_length, w_max − w_min + 2·ray_margin)`. The hit closest to the ray origin is used. If the ray misses the mesh the point is discarded (`discarded_points`).
+   **Edge margin.** At load time the boundary of the mesh is extracted (edges shared by a single triangle: outer outline and holes) and indexed with a `vtkCellLocator`. With `edge_margin > 0`, hit points whose 3D distance from the boundary is below `edge_margin` are dropped (`edge_discarded_points`). A closed mesh has no boundary and is not affected. On reconstructed meshes the boundary follows the triangles, so it is as jagged as the mesh outline.
 4. **Normal.** Barycentric interpolation of the vertex normals of the hit triangle (`interpolate_normals: true`), or the triangle normal. Face normals are oriented towards `+e3` before averaging them into vertex normals, so the result does not depend on the triangle winding. The final normal always satisfies `n · e3 > 0`.
-5. **Pose.** `z` = normal; guide `x` = travel direction (`e1` on even rows, `−e1` on odd rows; always `e1` if `keep_tool_orientation` is true), made orthogonal to `z` by Gram-Schmidt; `y = z × x`. If the normal is parallel to the guide direction, `e2` is used as guide.
+5. **Pose.** `z` = normal; guide `x` = travel direction (`d1` on even rows, `−d1` on odd rows; always `d1` if `keep_tool_orientation` is true), made orthogonal to `z` by Gram-Schmidt; `y = z × x`. If the normal is parallel to the guide direction, `d2` is used as guide.
 6. **Jumps.** Pose `i > 0` is a jump if at least one of these holds:
-   - some rays missed the mesh between pose `i−1` and pose `i` (also whole rows);
+   - some rays missed the mesh between pose `i−1` and pose `i` inside the same row (a hole), or a whole row missed the mesh. Misses before the first hit or after the last hit of a row (the row runs past the outline, typical with `row_angle ≠ 0`) do not open a segment by themselves, and neither do the points dropped by `edge_margin`: the distance criterion below decides;
    - `‖p_i − p_{i−1}‖ > jump_distance_factor · max(point_spacing, row_step)` (the `max` avoids flagging the normal row change);
    - `jump_angle_threshold > 0` and the angle between `n_i` and `n_{i−1}` exceeds it.
 

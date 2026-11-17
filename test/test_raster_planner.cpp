@@ -13,6 +13,7 @@
 
 using surface_raster_planner::PlannerOptions;
 using surface_raster_planner::RasterPlanner;
+using surface_raster_planner::RasterRequest;
 using surface_raster_planner::RasterResult;
 using surface_raster_planner::TriangleMesh;
 using surface_raster_planner::splitSegments;
@@ -218,6 +219,90 @@ TEST(RasterPlanner, AngleJumpAndShortSegments)
   }
 }
 
+TEST(RasterPlanner, RowAngle)
+{
+  RasterPlanner planner;
+  std::string error;
+  ASSERT_TRUE(planner.setMesh(gridMesh(0.3, 0.1, 0.01, flat), Eigen::Vector3d::UnitZ(), error));
+
+  // pi/2: rows along the short side (y), spaced along x
+  RasterRequest req;
+  req.row_step = 0.02;
+  req.row_angle = M_PI / 2.0;
+  RasterResult r;
+  ASSERT_TRUE(planner.compute(req, defaultOptions(), r, error)) << error;
+  EXPECT_EQ(r.rows, 16u);  // 0.3 / 0.02 + 1
+  EXPECT_EQ(r.discarded_points, 0u);
+  EXPECT_TRUE(r.jump_indices.empty());
+  const std::size_t per_row = r.poses.size() / r.rows;
+  // x follows the travel direction: d1 = e2 (+-y) on even rows, -d1 on odd rows
+  const double sign0 = r.poses[0].linear().col(0).y();
+  EXPECT_NEAR(std::abs(sign0), 1.0, 1e-9);
+  for (std::size_t i = 0; i < r.poses.size(); ++i) {
+    expectOrthonormal(r.poses[i]);
+    const double expected = ((i / per_row) % 2 == 0) ? sign0 : -sign0;
+    EXPECT_NEAR(r.poses[i].linear().col(0).y(), expected, 1e-9);
+  }
+
+  // 45 deg: the rows run past the outline, the misses at the row ends do not split the serpentine
+  req.row_angle = M_PI / 4.0;
+  req.keep_tool_orientation = true;
+  ASSERT_TRUE(planner.compute(req, defaultOptions(), r, error)) << error;
+  EXPECT_GT(r.discarded_points, 0u);
+  EXPECT_EQ(r.poses.size() + r.discarded_points, r.raster_points);
+  const Eigen::Vector3d d1 = Eigen::Vector3d(1.0, 1.0, 0.0).normalized();
+  for (const auto & p : r.poses) {
+    EXPECT_NEAR(p.linear().col(0).dot(d1), 1.0, 1e-9);
+  }
+  const auto segments = splitSegments(r.poses.size(), r.jump_indices);
+  EXPECT_LT(segments.size(), r.rows / 2);
+}
+
+TEST(RasterPlanner, EdgeMargin)
+{
+  auto hole = [](double x, double y) {
+      return std::hypot(x - 0.15, y - 0.05) < 0.02;
+    };
+  RasterPlanner planner;
+  std::string error;
+  ASSERT_TRUE(planner.setMesh(
+      gridMesh(0.3, 0.1, 0.005, flat, hole), Eigen::Vector3d::UnitZ(), error));
+  EXPECT_GT(planner.boundaryEdges(), 0u);
+
+  RasterRequest req;
+  req.row_step = 0.01;
+  RasterResult r0;
+  ASSERT_TRUE(planner.compute(req, defaultOptions(), r0, error)) << error;
+  EXPECT_EQ(r0.edge_discarded_points, 0u);
+
+  req.edge_margin = 0.012;
+  RasterResult r;
+  ASSERT_TRUE(planner.compute(req, defaultOptions(), r, error)) << error;
+  EXPECT_GT(r.edge_discarded_points, 0u);
+  EXPECT_EQ(r.poses.size() + r.edge_discarded_points, r0.poses.size());
+  for (const auto & p : r.poses) {
+    const Eigen::Vector3d & t = p.translation();
+    // outer outline [0, 0.3] x [0, 0.1]
+    EXPECT_GE(t.x(), 0.012 - 1e-9);
+    EXPECT_LE(t.x(), 0.3 - 0.012 + 1e-9);
+    EXPECT_GE(t.y(), 0.012 - 1e-9);
+    EXPECT_LE(t.y(), 0.1 - 0.012 + 1e-9);
+    // the hole outline is a staircase of cells containing the circle of radius 0.02
+    EXPECT_GE(std::hypot(t.x() - 0.15, t.y() - 0.05), 0.02 + 0.012 - 1e-9);
+  }
+
+  // A margin wider than the surface leaves nothing
+  req.edge_margin = 0.06;
+  EXPECT_FALSE(planner.compute(req, defaultOptions(), r, error));
+
+  // Closed mesh (tetrahedron): no boundary, the margin has no effect
+  TriangleMesh tet;
+  tet.vertices = {{0, 0, 0}, {0.2, 0, 0}, {0, 0.1, 0}, {0, 0, 0.05}};
+  tet.triangles = {{0, 2, 1}, {0, 1, 3}, {1, 2, 3}, {0, 3, 2}};
+  ASSERT_TRUE(planner.setMesh(tet, Eigen::Vector3d::UnitZ(), error));
+  EXPECT_EQ(planner.boundaryEdges(), 0u);
+}
+
 TEST(RasterPlanner, InvalidInputs)
 {
   RasterPlanner planner;
@@ -230,6 +315,12 @@ TEST(RasterPlanner, InvalidInputs)
   auto o = defaultOptions();
   o.max_raster_points = 10;
   EXPECT_FALSE(planner.compute(0.01, false, o, r, error));
+  RasterRequest req;
+  req.edge_margin = -0.01;
+  EXPECT_FALSE(planner.compute(req, defaultOptions(), r, error));
+  req.edge_margin = 0.0;
+  req.row_angle = std::nan("");
+  EXPECT_FALSE(planner.compute(req, defaultOptions(), r, error));
 }
 
 TEST(SplitSegments, Basic)

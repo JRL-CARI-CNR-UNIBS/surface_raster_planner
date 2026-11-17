@@ -48,6 +48,19 @@ Tuning of the raster generation (node parameters).
 | `min_segment_poses` | `std::size_t` | segments with fewer poses are dropped |
 | `max_raster_points` | `std::size_t` | refuse requests generating more raster points |
 
+### struct `surface_raster_planner::RasterRequest`
+
+Per-request raster settings (ComputeTrajectory request).
+
+#### Public attributes
+
+| Member | Type | Description |
+|---|---|---|
+| `row_step` | `double` | [m] distance between rows, along the row normal d2 |
+| `keep_tool_orientation` | `bool` | tool x axis always d1 (true) or travel direction (false) |
+| `row_angle` | `double` | [rad] row direction d1 = rotation of e1 around e3 |
+| `edge_margin` | `double` | [m] drop poses closer than this to the mesh boundary |
+
 ### struct `surface_raster_planner::RasterResult`
 
 Output of `RasterPlanner::compute`.
@@ -59,6 +72,7 @@ Output of `RasterPlanner::compute`.
 | `poses` | `std::vector< Eigen::Isometry3d >` | tool poses in the mesh frame |
 | `jump_indices` | `std::vector< uint32_t >` | sorted, never 0: first pose of each new segment |
 | `discarded_points` | `uint32_t` | raster points whose ray missed the mesh |
+| `edge_discarded_points` | `uint32_t` | hit points dropped because closer than edge_margin |
 | `removed_poses` | `uint32_t` | poses dropped with segments shorter than min_segment_poses |
 | `rows` | `std::size_t` | number of raster rows |
 | `raster_points` | `std::size_t` | number of rays cast |
@@ -135,25 +149,43 @@ bool isAxisAmbiguous(double ratio) const
 
 True if lambda2 / lambda1 &gt; ratio, i.e. the long side direction is not well defined.
 
+##### `boundaryEdges`
+
+```cpp
+std::size_t boundaryEdges() const
+```
+
+Number of boundary edges (edges shared by a single triangle); 0 for a closed mesh.
+
 ##### `compute`
 
 ```cpp
-bool compute(double row_step, bool keep_tool_orientation, const PlannerOptions &options, RasterResult &result, std::string &error) const
+bool compute(const RasterRequest &request, const PlannerOptions &options, RasterResult &result, std::string &error) const
 ```
 
 Compute the raster (serpentine) poses on the mesh.
 
-Rows are parallel to e1 and spaced by `row_step` along e2; on each row, a ray is cast along -e3 every options.point_spacing and the hit point becomes a pose with z axis along the surface normal. A new segment (jump) starts where consecutive poses are far apart or their normals differ too much.
+The row direction is d1 = cos(row_angle) e1 + sin(row_angle) e2 and the rows are spaced by `request.row_step` along d2 = e3 x d1, covering the bounding box of the mesh in the rotated frame (d1, d2, e3). On each row, a ray is cast along -e3 every options.point_spacing and the hit point becomes a pose with z axis along the surface normal. Hit points closer than `request.edge_margin` to the mesh boundary are dropped. A new segment (jump) starts where rays miss the mesh inside a row, where a whole row misses the mesh, or where consecutive poses are far apart or their normals differ too much. Misses before the first hit or after the last hit of a row (the row runs past the outline) do not open a segment by themselves: the distance criterion decides.
 
 **Parameters:**
 
-- `row_step`: Distance between rows [m] (&gt; 0).
-- `keep_tool_orientation`: If true, the tool x axis is always e1; if false it follows the travel direction (reversed on return rows).
+- `request`: Row step, tool orientation, row angle and edge margin.
 - `options`: Raster options.
 - `result` [out]: Poses, jump indices and statistics.
 - `error` [out]: Error message.
 
 **Returns:** False if no mesh is loaded, the parameters are invalid, or too many points are requested.
+
+```cpp
+bool compute(double row_step, bool keep_tool_orientation, const PlannerOptions &options, RasterResult &result, std::string &error) const
+```
+
+Same as the previous overload with row_angle = 0 and edge_margin = 0.
+
+**Parameters:**
+
+- `row_step`: Distance between rows [m] (&gt; 0).
+- `keep_tool_orientation`: If true, the tool x axis is always e1; if false it follows the travel direction (reversed on return rows).
 
 ### Free functions and types
 

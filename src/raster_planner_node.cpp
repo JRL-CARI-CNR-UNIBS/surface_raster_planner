@@ -227,7 +227,8 @@ bool RasterPlannerNode::setMesh(
       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     ss.precision(3);
     ss << "Mesh loaded in frame '" << frame_id << "': " << planner_.mesh().vertices.size()
-       << " vertices, " << planner_.mesh().triangles.size() << " triangles, local box "
+       << " vertices, " << planner_.mesh().triangles.size() << " triangles, "
+       << planner_.boundaryEdges() << " boundary edges, local box "
        << box.sizes().x() << " x " << box.sizes().y() << " x " << box.sizes().z()
        << " m, e1 = [" << R.col(0).transpose() << "], e3 = [" << R.col(2).transpose()
        << "], eigenvalues [" << ev.transpose() << "] (" << ms << " ms)";
@@ -305,10 +306,16 @@ void RasterPlannerNode::computeTrajectoryCallback(
   bool ok;
   {
     std::lock_guard<std::mutex> lock(planner_mutex_);
-    ok = planner_.compute(req->row_step, req->keep_tool_orientation, options, result, error);
+    RasterRequest request;
+    request.row_step = req->row_step;
+    request.keep_tool_orientation = req->keep_tool_orientation;
+    request.row_angle = req->row_angle;
+    request.edge_margin = req->edge_margin;
+    ok = planner_.compute(request, options, result, error);
     frame = mesh_frame_;
   }
   res->discarded_points = result.discarded_points;
+  res->edge_discarded_points = result.edge_discarded_points;
   if (!ok) {
     res->success = false;
     res->message = "compute_trajectory failed: " + error;
@@ -336,6 +343,9 @@ void RasterPlannerNode::computeTrajectoryCallback(
   ss << result.poses.size() << " poses in " << segments.size() << " segments ("
      << result.rows << " rows, " << result.raster_points << " rays, " << result.discarded_points
      << " discarded points";
+  if (req->edge_margin > 0.0) {
+    ss << ", " << result.edge_discarded_points << " points within edge_margin";
+  }
   if (result.removed_poses > 0) {
     ss << ", " << result.removed_poses << " poses removed in segments shorter than "
        << options.min_segment_poses;

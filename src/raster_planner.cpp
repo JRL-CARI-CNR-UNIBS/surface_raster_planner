@@ -8,6 +8,7 @@
 #include <cmath>
 #include <limits>
 #include <sstream>
+#include <unordered_map>
 
 #include <pcl/common/pca.h>
 #include <pcl/point_cloud.h>
@@ -17,6 +18,7 @@
 #include <vtkIdList.h>
 #include <vtkNew.h>
 #include <vtkPoints.h>
+#include <vtkGenericCell.h>
 
 namespace surface_raster_planner
 {
@@ -77,6 +79,9 @@ bool RasterPlanner::setMesh(
 {
   poly_data_ = nullptr;
   tree_ = nullptr;
+  boundary_edges_ = 0;
+  boundary_data_ = nullptr;
+  boundary_locator_ = nullptr;
   mesh_ = TriangleMesh();
   face_normals_.clear();
   vertex_normals_.clear();
@@ -193,7 +198,51 @@ bool RasterPlanner::setMesh(
   tree_->SetDataSet(poly_data_);
   tree_->SetTolerance(1e-6);
   tree_->BuildLocator();
+
+  // Boundary: edges shared by exactly one triangle (outline and holes), used by edge_margin
+  std::unordered_map<uint64_t, int> edge_count;
+  edge_count.reserve(3 * mesh_.triangles.size());
+  auto key = [](uint32_t a, uint32_t b) {
+      return (static_cast<uint64_t>(std::min(a, b)) << 32) | std::max(a, b);
+    };
+  for (const auto & t : mesh_.triangles) {
+    for (int i = 0; i < 3; ++i) {
+      ++edge_count[key(t[i], t[(i + 1) % 3])];
+    }
+  }
+  vtkNew<vtkCellArray> lines;
+  for (const auto & [k, count] : edge_count) {
+    if (count == 1) {
+      const vtkIdType ids[2] = {static_cast<vtkIdType>(k >> 32),
+        static_cast<vtkIdType>(k & 0xffffffffu)};
+      lines->InsertNextCell(2, ids);
+      ++boundary_edges_;
+    }
+  }
+  if (boundary_edges_ > 0) {
+    boundary_data_ = vtkSmartPointer<vtkPolyData>::New();
+    boundary_data_->SetPoints(points);
+    boundary_data_->SetLines(lines);
+    boundary_locator_ = vtkSmartPointer<vtkCellLocator>::New();
+    boundary_locator_->SetDataSet(boundary_data_);
+    boundary_locator_->BuildLocator();
+  }
   return true;
+}
+
+bool RasterPlanner::nearBoundary(const Eigen::Vector3d & p, double radius) const
+{
+  if (!boundary_locator_ || !(radius > 0.0)) {
+    return false;
+  }
+  double x[3] = {p.x(), p.y(), p.z()};
+  double closest[3];
+  vtkNew<vtkGenericCell> cell;
+  vtkIdType cell_id;
+  int sub_id;
+  double dist2;
+  return boundary_locator_->FindClosestPointWithinRadius(
+    x, radius, closest, cell, cell_id, sub_id, dist2) != 0;
 }
 
 bool RasterPlanner::isAxisAmbiguous(double ratio) const
@@ -254,7 +303,18 @@ bool RasterPlanner::compute(
   double row_step, bool keep_tool_orientation, const PlannerOptions & options,
   RasterResult & result, std::string & error) const
 {
+  RasterRequest request;
+  request.row_step = row_step;
+  request.keep_tool_orientation = keep_tool_orientation;
+  return compute(request, options, result, error);
+}
+
+bool RasterPlanner::compute(
+  const RasterRequest & request, const PlannerOptions & options,
+  RasterResult & result, std::string & error) const
+{
   result = RasterResult();
+  const double row_step = request.row_step;
   if (!hasMesh()) {
     error = "no mesh loaded";
     return false;
@@ -267,10 +327,35 @@ bool RasterPlanner::compute(
     error = "max_ray_length must be positive";
     return false;
   }
+  if (!std::isfinite(request.row_angle)) {
+    error = "row_angle must be finite";
+    return false;
+  }
+  if (!(request.edge_margin >= 0.0) || !std::isfinite(request.edge_margin)) {
+    error = "edge_margin must be >= 0";
+    return false;
+  }
 
-  const Eigen::Vector3d & lo = local_box_.min();
-  const Eigen::Vector3d & hi = local_box_.max();
-  // 4. 2D serpentine: rows parallel to e1 at v = v_min + k * row_step, points every point_spacing
+  // Raster frame: (d1, d2, e3) = local frame rotated by row_angle around e3
+  const Eigen::Matrix3d R_local_raster =
+    Eigen::AngleAxisd(request.row_angle, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  Eigen::Isometry3d T_world_raster = T_world_local_;
+  T_world_raster.linear() = T_world_local_.linear() * R_local_raster;
+
+  // Bounding box of the vertices in the raster frame
+  Eigen::AlignedBox3d box;
+  if (request.row_angle == 0.0) {
+    box = local_box_;
+  } else {
+    const Eigen::Isometry3d T_raster_world = T_world_raster.inverse();
+    for (const auto & vtx : mesh_.vertices) {
+      box.extend(T_raster_world * vtx);
+    }
+  }
+
+  const Eigen::Vector3d & lo = box.min();
+  const Eigen::Vector3d & hi = box.max();
+  // 4. 2D serpentine: rows parallel to d1 at v = v_min + k * row_step, points every point_spacing
   const auto n_rows = static_cast<std::size_t>(std::floor((hi.y() - lo.y()) / row_step + 1e-9)) + 1;
   const auto n_cols =
     static_cast<std::size_t>(std::floor((hi.x() - lo.x()) / options.point_spacing + 1e-9)) + 1;
@@ -286,9 +371,9 @@ bool RasterPlanner::compute(
   result.rows = n_rows;
   result.raster_points = n_rows * n_cols;
 
-  const Eigen::Matrix3d R = T_world_local_.linear();
-  const Eigen::Vector3d e1 = R.col(0);
-  const Eigen::Vector3d e2 = R.col(1);
+  const Eigen::Matrix3d R = T_world_raster.linear();
+  const Eigen::Vector3d d1 = R.col(0);
+  const Eigen::Vector3d d2 = R.col(1);
   const Eigen::Vector3d e3 = R.col(2);
   const double w_start = hi.z() + options.ray_margin;
   const double ray_length =
@@ -300,35 +385,60 @@ bool RasterPlanner::compute(
   std::vector<Eigen::Isometry3d> poses;
   std::vector<uint32_t> jumps;
   poses.reserve(result.raster_points);
-  bool gap = false;  // some rays missed the mesh since the last valid pose
+  bool gap = false;  // the next valid pose must open a new segment
+
+  struct Hit
+  {
+    bool valid{false};
+    Eigen::Vector3d point;
+    vtkIdType cell{-1};
+  };
+  std::vector<Hit> row_hits(n_cols);
 
   for (std::size_t k = 0; k < n_rows; ++k) {
     const bool return_row = (k % 2) == 1;
     const double v = lo.y() + static_cast<double>(k) * row_step;
-    // 7. guide x axis: travel direction, or always e1 with keep_tool_orientation
-    const Eigen::Vector3d x_guide = (return_row && !keep_tool_orientation) ? -e1 : e1;
+    // 7. guide x axis: travel direction, or always d1 with keep_tool_orientation
+    const Eigen::Vector3d x_guide = (return_row && !request.keep_tool_orientation) ? -d1 : d1;
 
+    // 5. Ray casting along -e3, in travel order
+    std::size_t first = n_cols, last = 0;
     for (std::size_t j = 0; j < n_cols; ++j) {
       const std::size_t jj = return_row ? n_cols - 1 - j : j;
       const double u = lo.x() + static_cast<double>(jj) * options.point_spacing;
-
-      // 5. Ray casting along -e3
-      const Eigen::Vector3d origin = T_world_local_ * Eigen::Vector3d(u, v, w_start);
+      const Eigen::Vector3d origin = T_world_raster * Eigen::Vector3d(u, v, w_start);
       const Eigen::Vector3d end = origin - ray_length * e3;
-      Eigen::Vector3d hit;
-      vtkIdType cell = -1;
-      if (!castRay(origin, end, hit, cell)) {
+      Hit & h = row_hits[j];
+      h.valid = castRay(origin, end, h.point, h.cell);
+      if (h.valid) {
+        first = std::min(first, j);
+        last = j;
+      } else {
         ++result.discarded_points;
-        gap = !poses.empty();
+      }
+    }
+    if (first == n_cols) {
+      gap = !poses.empty();  // the whole row missed the mesh
+      continue;
+    }
+
+    for (std::size_t j = first; j <= last; ++j) {
+      const Hit & h = row_hits[j];
+      if (!h.valid) {
+        gap = !poses.empty();  // hole inside the row
+        continue;
+      }
+      if (nearBoundary(h.point, request.edge_margin)) {
+        ++result.edge_discarded_points;
         continue;
       }
 
       // 6. Local normal, 7. pose (Gram-Schmidt)
-      const Eigen::Vector3d z = normalAt(cell, hit, options.interpolate_normals);
+      const Eigen::Vector3d z = normalAt(h.cell, h.point, options.interpolate_normals);
       Eigen::Vector3d x = x_guide - x_guide.dot(z) * z;
       if (x.norm() < 1e-6) {
-        // Normal parallel to the travel direction (vertical wall): fall back on e2
-        x = e2 - e2.dot(z) * z;
+        // Normal parallel to the travel direction (vertical wall): fall back on d2
+        x = d2 - d2.dot(z) * z;
       }
       x.normalize();
       const Eigen::Vector3d y = z.cross(x);
@@ -337,13 +447,13 @@ bool RasterPlanner::compute(
       pose.linear().col(0) = x;
       pose.linear().col(1) = y;
       pose.linear().col(2) = z;
-      pose.translation() = hit;
+      pose.translation() = h.point;
 
       // 8. Jump detection
       if (!poses.empty()) {
         const auto & prev = poses.back();
         bool jump = gap;
-        jump = jump || (hit - prev.translation()).norm() > jump_distance;
+        jump = jump || (h.point - prev.translation()).norm() > jump_distance;
         jump = jump || (options.jump_angle_threshold > 0.0 &&
           z.dot(prev.linear().col(2)) < cos_angle_threshold);
         if (jump) {
@@ -356,8 +466,9 @@ bool RasterPlanner::compute(
   }
 
   if (poses.empty()) {
-    error = "no ray hit the mesh (check max_ray_length and the mesh)";
-    result.discarded_points = static_cast<uint32_t>(result.raster_points);
+    error = result.edge_discarded_points > 0 ?
+      "all the hit points are closer than edge_margin to the mesh boundary" :
+      "no ray hit the mesh (check max_ray_length and the mesh)";
     return false;
   }
 
